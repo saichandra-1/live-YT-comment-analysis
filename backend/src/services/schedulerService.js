@@ -40,7 +40,7 @@ class SchedulerService {
     this.runAnalysisCycle(stream);
 
     // Set different schedules based on whether it's live or not
-    const cronSchedule = stream.isLive ? '*/2 * * * *' : '*/5 * * * *'; // Live: every 2 min, Non-live: every 5 min
+    const cronSchedule = stream.isLive ? '*/1 * * * *' : '*/5 * * * *'; // Live: every 1 min, Non-live: every 5 min
     const job = cron.schedule(cronSchedule, () => {
       this.runAnalysisCycle(stream);
     }, {
@@ -86,6 +86,8 @@ class SchedulerService {
         nextPageToken = result.nextPageToken;
       }
       
+      logger.info(`Fetched ${messages.length} messages for stream ${stream.youtubeVideoId}`);
+      
       if (messages.length === 0) {
         logger.info(`No new messages for stream ${stream.youtubeVideoId}`);
         return;
@@ -99,45 +101,50 @@ class SchedulerService {
         title: stream.title,
         channelTitle: stream.channelTitle,
         batchStartTime: new Date().toISOString(),
+        batchEndTime: new Date().toISOString(),
       };
 
-      // Run all analysis tasks in parallel
-      const [
-        summary,
-        sentiment,
-        questions,
-        suggestions,
-        topics
-      ] = await Promise.allSettled([
-        llmService.summarizeChat(messages, streamMetadata),
-        llmService.analyzeSentiment(messages),
-        llmService.findFrequentQuestions(messages),
-        llmService.generateModeratorSuggestions(messages, streamMetadata),
-        llmService.findTrendingTopics(messages)
-      ]);
-
-      // Normalize result keys to match DB enum and frontend expectations
-      const results = {
-        summary: summary.status === 'fulfilled' ? summary.value : null,
-        sentiment: sentiment.status === 'fulfilled' ? sentiment.value : null,
-        questions: questions.status === 'fulfilled' ? questions.value : null,
-        moderation: suggestions.status === 'fulfilled' ? suggestions.value : null,
-        trending: topics.status === 'fulfilled' ? topics.value : null,
-      };
-
-      // Save results to database (only allowed enum types)
-      const allowedTypes = ['summary', 'sentiment', 'questions', 'moderation', 'trending'];
-      for (const type of allowedTypes) {
-        if (results[type]) {
-          await Analysis.create({
-            StreamId: stream.id,
-            type,
-            data: results[type],
-          });
-        }
-      }
+      // Run analysis
+      // Rate-limit LLM calls: only every 1 minute per stream
+      const now = Date.now();
+      this._lastLLM = this._lastLLM || new Map();
+      const last = this._lastLLM.get(stream.id) || 0;
+      const oneMinute = 1 * 60 * 1000;
+      let results = {};
       
-      // Emit real-time results to the frontend
+      if (now - last >= oneMinute) {
+        logger.info(`Making LLM call for stream ${stream.id} (${messages.length} messages)`);
+        this._lastLLM.set(stream.id, now);
+        try {
+          const all = await llmService.analyzeAll(messages, streamMetadata);
+          logger.info(`LLM analysis completed successfully for stream ${stream.id}`);
+          results = {
+            summary: all.summary || null,
+            sentiment: all.sentiment || null,
+            questions: all.questions || null,
+            moderation: all.moderation || null,
+            trending: all.trending || null,
+          };
+        } catch (e) {
+          logger.warn('analyzeAll failed, using heuristic fallback', { error: e.message });
+          // Generate heuristic fallback to ensure we always have results
+          const heuristics = await llmService.generateHeuristics(messages, streamMetadata);
+          results = {
+            summary: heuristics.summary || null,
+            sentiment: heuristics.sentiment || null,
+            questions: heuristics.questions || null,
+            moderation: heuristics.moderation || null,
+            trending: heuristics.trending || null,
+          };
+        }
+      } else {
+        // Skip LLM this cycle; emit heartbeat without overwriting fields
+        const secondsSinceLast = Math.round((now - last) / 1000);
+        logger.info(`Skipping LLM call for stream ${stream.id} (only ${secondsSinceLast}s since last call)`);
+        results = {};
+      }
+
+      // Always emit something - either new results or heartbeat
       getIO().to(stream.id).emit('newAnalysis', {
         ...results,
         timestamp: streamMetadata.batchStartTime,

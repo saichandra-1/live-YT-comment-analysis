@@ -1,0 +1,238 @@
+@startuml YouTube Comment Analysis System - Complete Architecture
+
+' Define color scheme
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+
+' Define actors
+actor User as user <<Human>>
+actor "Google OAuth\nProvider" as google <<External>>
+actor "YouTube\nData API v3" as youtube <<External>>
+actor "OpenRouter\nLLM API" as llm <<External>>
+
+' Frontend Layer
+package "Frontend Layer\n(React SPA - Port 3000)" as frontend {
+  [Login Component] as login
+  [Stream Input] as input
+  [Analysis Dashboard] as dashboard
+  [Protected Route] as protected
+  
+  frame "State Management" {
+    [Auth Context] as authctx
+    [Stream Context] as streamctx
+  }
+  
+  frame "Services" {
+    [API Client\n(Axios)] as apiclient
+    [Auth Service] as authservice
+    [Socket.IO Client] as socketclient
+  }
+}
+
+' Backend Layer
+package "Backend Layer\n(Node.js/Express - Port 3001)" as backend {
+  [Express Server] as server
+  [Socket.IO Server] as socketserver
+  
+  frame "Routes" {
+    [Auth Routes] as authroutes
+    [Stream Routes] as streamroutes
+  }
+  
+  frame "Controllers" {
+    [Auth Controller] as authcontroller
+    [Stream Controller] as streamcontroller
+  }
+  
+  frame "Middleware" {
+    [Auth Middleware\n(JWT Verify)] as authmiddleware
+    [Error Handler] as errorhandler
+    [CORS] as cors
+  }
+}
+
+' Services Layer
+package "Business Logic Layer\n(Services)" as services {
+  [YouTube Service] as youtubeservice
+  [LLM Service] as llmservice
+  [Scheduler Service] as schedulerservice
+}
+
+' Data Layer
+package "Data Persistence Layer" as data {
+  database "PostgreSQL\nDatabase" as db {
+    [Users Table] as usertable
+    [Streams Table] as streamtable
+    [Analyses Table] as analysestable
+  }
+  
+  frame "ORM Layer" {
+    [User Model] as usermodel
+    [Stream Model] as streammodel
+    [Analysis Model] as analysismodel
+    [Sequelize ORM] as sequelize
+  }
+}
+
+' Infrastructure Layer
+package "Infrastructure\n& Utilities" as infra {
+  [Node-Cron\nScheduler] as cron
+  [Redis Cache\n(Optional)] as redis
+  [Logger Utility] as logger
+  [Socket Instance\nHolder] as socketutil
+}
+
+' ============ USER AUTHENTICATION FLOW ============
+user --> login : 1. Access Application
+login --> authservice : 2. Request Login
+authservice --> apiclient : 3. GET /auth/google
+apiclient --> authroutes : 4. API Call
+authroutes --> authcontroller : 5. Handle Request
+authcontroller --> google : 6. Redirect to OAuth
+google --> user : 7. Google Login Page
+user --> google : 8. Enter Credentials
+google --> authcontroller : 9. Callback with Code
+authcontroller --> google : 10. Exchange Code for Token
+google --> authcontroller : 11. User Profile Data
+authcontroller --> usermodel : 12. Create/Find User
+usermodel --> sequelize : 13. ORM Operation
+sequelize --> usertable : 14. INSERT/SELECT
+usertable --> sequelize : 15. User Record
+sequelize --> usermodel : 16. User Object
+usermodel --> authcontroller : 17. User Data
+authcontroller --> authcontroller : 18. Generate JWT
+authcontroller --> user : 19. Redirect with Token
+user --> authservice : 20. Store Token
+authservice --> authctx : 21. Update Auth State
+
+' ============ STREAM ANALYSIS FLOW ============
+user --> input : 22. Enter YouTube URL
+input --> streamctx : 23. Call startAnalysis()
+streamctx --> apiclient : 24. POST /streams/start
+apiclient --> server : 25. HTTP Request
+server --> cors : 26. CORS Check
+cors --> streamroutes : 27. Route to Handler
+streamroutes --> authmiddleware : 28. Verify JWT
+authmiddleware --> usermodel : 29. Fetch User by ID
+usermodel --> authmiddleware : 30. User Object
+authmiddleware --> streamcontroller : 31. Attach req.user
+streamcontroller --> youtubeservice : 32. getVideoDetails()
+youtubeservice --> youtube : 33. GET /videos?id={videoId}
+youtube --> youtubeservice : 34. Video Metadata JSON
+youtubeservice --> streamcontroller : 35. Parsed Video Data
+streamcontroller --> streammodel : 36. Create Stream Record
+streammodel --> sequelize : 37. ORM Save
+sequelize --> streamtable : 38. INSERT Stream
+streamtable --> sequelize : 39. Stream ID
+sequelize --> streammodel : 40. Stream Object
+streammodel --> streamcontroller : 41. Saved Stream
+streamcontroller --> schedulerservice : 42. startAnalysis(streamId)
+
+' ============ SCHEDULER & CRON FLOW ============
+schedulerservice --> cron : 43. Create Cron Job
+cron --> schedulerservice : 44. Schedule Configured\n(1 min / 5 min)
+schedulerservice --> schedulerservice : 45. Immediate First Run
+schedulerservice --> youtubeservice : 46. fetchLiveComments() /\nfetchVideoComments()
+youtubeservice --> youtube : 47. GET /liveChat/messages\nor /commentThreads
+youtube --> youtubeservice : 48. Comment Data JSON
+youtubeservice --> schedulerservice : 49. Messages Array
+schedulerservice --> llmservice : 50. analyzeAll(messages)
+
+' ============ LLM ANALYSIS FLOW ============
+llmservice --> llmservice : 51. Rate Limit Check\n(1 call/min)
+llmservice --> llmservice : 52. Build Prompts
+llmservice --> llm : 53. POST /chat/completions\n(JSON Request)
+llm --> llmservice : 54. Analysis JSON Response
+llmservice --> llmservice : 55. Parse & Validate
+llmservice --> llmservice : 56. Retry Logic\n(3 attempts)
+llmservice --> llmservice : 57. Fallback to Heuristics\n(if LLM fails)
+llmservice --> schedulerservice : 58. Analysis Results
+
+' ============ DATA SAVE & BROADCAST FLOW ============
+schedulerservice --> analysismodel : 59. Save Analysis
+analysismodel --> sequelize : 60. ORM Save
+sequelize --> analysestable : 61. INSERT Analysis
+analysestable --> sequelize : 62. Analysis ID
+schedulerservice --> socketserver : 63. emit('newAnalysis')
+socketserver --> socketutil : 64. Get IO Instance
+socketutil --> socketserver : 65. IO Object
+socketserver --> socketclient : 66. WebSocket Push
+socketclient --> streamctx : 67. Update State
+streamctx --> dashboard : 68. Re-render UI
+dashboard --> user : 69. Display Results
+
+' ============ ERROR HANDLING FLOW ============
+streamcontroller ..> errorhandler : On Error
+youtubeservice ..> logger : Log Errors
+llmservice ..> logger : Log Failures
+schedulerservice ..> logger : Log Cycles
+errorhandler ..> user : Error Response
+
+' ============ STOP ANALYSIS FLOW ============
+user --> input : 70. Click Stop
+input --> streamctx : 71. stopAnalysis()
+streamctx --> apiclient : 72. POST /streams/:id/stop
+apiclient --> streamcontroller : 73. Stop Request
+streamcontroller --> schedulerservice : 74. stopAnalysis(streamId)
+schedulerservice --> cron : 75. Stop Cron Job
+schedulerservice --> streammodel : 76. Update isActive=false
+streammodel --> sequelize : 77. ORM Update
+sequelize --> streamtable : 78. UPDATE Stream
+schedulerservice --> socketserver : 79. emit('streamStatus')
+socketserver --> socketclient : 80. Status Update
+socketclient --> streamctx : 81. Update Status
+streamctx --> dashboard : 82. Show Stopped State
+
+' Notes
+note right of schedulerservice
+  <b>Scheduling Logic:</b>
+  • Live streams: every 1 minute
+  • Regular videos: every 5 minutes
+  • Active jobs stored in Map
+  • Graceful shutdown on stop
+end note
+
+note right of llmservice
+  <b>Analysis Types:</b>
+  1. Chat Summarization
+  2. Sentiment Analysis
+  3. Frequent Questions
+  4. Moderation Suggestions
+  5. Trending Topics
+  
+  <b>Fallback Strategy:</b>
+  LLM Fail → Heuristics
+  (Word frequency, keywords)
+end note
+
+note right of youtubeservice
+  <b>YouTube API Endpoints:</b>
+  • /videos (metadata)
+  • /liveChat/messages (live)
+  • /commentThreads (regular)
+  
+  <b>Pagination:</b>
+  Uses pageToken for batching
+end note
+
+note right of socketserver
+  <b>Real-time Events:</b>
+  • newAnalysis (data push)
+  • streamStatus (state change)
+  • joinStream (room subscribe)
+  • leaveStream (room unsubscribe)
+end note
+
+note bottom of db
+  <b>Database Schema:</b>
+  Users (1) ──< (N) Streams
+  Streams (1) ──< (N) Analyses
+  
+  <b>Indexes:</b>
+  • youtubeVideoId (unique)
+  • googleId (unique)
+  • createdAt (for sorting)
+end note
+
+@enduml
+

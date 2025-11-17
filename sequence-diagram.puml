@@ -1,0 +1,136 @@
+@startuml YouTube Comment Analysis - Sequence Diagram
+
+title YouTube Comment Analysis System - Main Flow Sequence
+
+actor User
+participant "React\nFrontend" as Frontend
+participant "Express\nServer" as Backend
+participant "Auth\nMiddleware" as Auth
+participant "Stream\nController" as Controller
+participant "YouTube\nService" as YouTube
+participant "Scheduler\nService" as Scheduler
+participant "LLM\nService" as LLM
+participant "PostgreSQL\nDatabase" as DB
+participant "Socket.IO" as Socket
+participant "YouTube\nAPI" as YTAPI
+participant "OpenRouter\nLLM API" as LLMAPI
+
+== Authentication Phase ==
+User -> Frontend: Click "Start Analyzing"
+Frontend -> Frontend: Store dummy token
+Frontend -> User: Show Main Dashboard
+
+== Stream Initialization Phase ==
+User -> Frontend: Enter YouTube URL\nhttps://youtube.com/watch?v=ABC123
+Frontend -> Backend: POST /api/streams/start\n{ youtubeUrl: "..." }
+Backend -> Auth: Verify JWT Token
+Auth -> DB: Find User by ID
+DB -> Auth: User Record
+Auth -> Controller: Authorized (req.user)
+
+Controller -> YouTube: getVideoDetails(videoId)
+YouTube -> YTAPI: GET /videos?id=ABC123&part=snippet,liveStreamingDetails
+YTAPI -> YouTube: { title, channelTitle, isLive, liveChatId }
+YouTube -> Controller: Parsed Video Metadata
+
+Controller -> DB: INSERT INTO Streams\n(youtubeVideoId, title, liveChatId, isLive, UserId)
+DB -> Controller: Stream Record (id: 1, isActive: true)
+
+Controller -> Scheduler: startAnalysis(streamId=1, userId=1)
+note right of Scheduler
+  Creates cron job:
+  • Live: every 1 minute
+  • Regular: every 5 minutes
+end note
+
+Scheduler -> Scheduler: Immediate First Run
+
+Controller -> Frontend: { message: "Analysis started", stream: {...} }
+Frontend -> Socket: Connect WebSocket
+Frontend -> Socket: emit('joinStream', streamId=1)
+Socket -> Frontend: Connection Established
+Frontend -> User: Show "Analyzing: [Video Title]"
+
+== Analysis Cycle Phase (Recurring) ==
+
+Scheduler -> YouTube: fetchLiveComments(liveChatId, pageToken)
+note right of YouTube
+  For regular videos:
+  fetchVideoComments(videoId, pageToken)
+end note
+
+YouTube -> YTAPI: GET /liveChat/messages?liveChatId=xyz&maxResults=200
+YTAPI -> YouTube: {\n  items: [{id, text, author, timestamp}, ...],\n  nextPageToken: "token123"\n}
+YouTube -> Scheduler: messages[] (200 comments)
+
+Scheduler -> DB: UPDATE Streams\nSET lastFetchedCommentId='token123'\nWHERE id=1
+DB -> Scheduler: Updated
+
+Scheduler -> Scheduler: Check Rate Limit\n(1 LLM call per minute)
+alt LLM Call Allowed
+  Scheduler -> LLM: analyzeAll(messages, streamMetadata)
+  
+  LLM -> LLM: Build System Prompt +\nUser Prompt
+  
+  LLM -> LLMAPI: POST /chat/completions\n{\n  model: "z-ai/glm-4.5-air:free",\n  messages: [...],\n  response_format: {type: "json_object"}\n}
+  
+  LLMAPI -> LLMAPI: Process with AI Model
+  LLMAPI -> LLM: {\n  summary: {...},\n  sentiment: {...},\n  questions: {...},\n  moderation: {...},\n  trending: {...}\n}
+  
+  LLM -> LLM: Parse & Validate JSON
+  
+  alt LLM Success
+    LLM -> Scheduler: Analysis Results (JSON)
+  else LLM Failure (3 retries exhausted)
+    LLM -> LLM: Generate Heuristic Fallback\n(Word frequency, keyword analysis)
+    LLM -> Scheduler: Heuristic Analysis Results
+  end
+  
+  Scheduler -> DB: INSERT INTO Analyses\n(StreamId=1, type='summary', data={...})
+  Scheduler -> DB: INSERT INTO Analyses\n(StreamId=1, type='sentiment', data={...})
+  Scheduler -> DB: INSERT INTO Analyses\n(StreamId=1, type='questions', data={...})
+  Scheduler -> DB: INSERT INTO Analyses\n(StreamId=1, type='trending', data={...})
+  DB -> Scheduler: Analysis Records Saved
+  
+  Scheduler -> Socket: emit('newAnalysis', {\n  summary: {...},\n  sentiment: {...},\n  questions: {...},\n  trending: {...},\n  timestamp: "2025-11-01T12:34:56Z",\n  messageCount: 200\n})
+  
+  Socket -> Frontend: newAnalysis Event (WebSocket)
+  Frontend -> Frontend: Merge with Existing State\n(Prevent UI regression)
+  Frontend -> User: Update Dashboard:\n• Summary Card\n• Sentiment Bars\n• Questions List\n• Trending Topics
+  
+else Rate Limited
+  Scheduler -> Scheduler: Skip LLM Call\n(< 1 minute since last call)
+  Scheduler -> Socket: emit('newAnalysis', {\n  timestamp: "...",\n  messageCount: 200\n})
+  Socket -> Frontend: Heartbeat (no new analysis)
+  Frontend -> User: Show Message Count Update Only
+end
+
+note over Scheduler
+  Cron job reschedules for next cycle
+  (1 or 5 minutes later)
+end note
+
+== Stop Analysis Phase ==
+
+User -> Frontend: Click "Stop Analysis"
+Frontend -> Backend: POST /api/streams/1/stop
+Backend -> Auth: Verify JWT
+Auth -> Controller: Authorized
+
+Controller -> Scheduler: stopAnalysis(streamId=1, userId=1)
+Scheduler -> Scheduler: Stop Cron Job\nRemove from activeJobs Map
+Scheduler -> DB: UPDATE Streams\nSET isActive=false\nWHERE id=1
+DB -> Scheduler: Updated
+
+Scheduler -> Socket: emit('streamStatus', {\n  status: "stopped",\n  message: "Analysis stopped."\n})
+Socket -> Frontend: streamStatus Event
+Frontend -> Frontend: Update Status to "stopped"
+Frontend -> User: Show "Analysis Stopped"\nEnable URL Input
+
+Controller -> Frontend: { message: "Analysis stopped." }
+Frontend -> Socket: emit('leaveStream', streamId=1)
+Socket -> Frontend: Disconnected from Room
+Frontend -> User: Return to Idle State
+
+@enduml
+
