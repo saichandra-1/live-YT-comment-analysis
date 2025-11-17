@@ -549,7 +549,10 @@ curl "http://localhost:3001/api/streams/start" -X POST \
 ---
 
 *Built with ❤️ *
+<img width="1847" height="1011" alt="Screenshot from 2025-11-01 10-18-44" src="https://github.com/user-attachments/assets/4898ab3a-01ab-402a-9716-bf380bb2eeac" />
 
 
 ## Example implementation
+
+
 
